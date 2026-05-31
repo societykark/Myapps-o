@@ -836,7 +836,7 @@ HTML = """
         <div class="card"><div class="badge">🔑 GitHub Secrets (org)</div><input type="text" id="github_secrets" placeholder="Organización"><button onclick="analyze('github_secrets')">Buscar secretos en repos</button><small>Requiere GitHub token</small></div>
     </div>
     <div id="result" class="result-box">⚡ Los resultados aparecerán aquí...</div>
-    <div class="footer">Desarrollado por @jsemanper · Uso educativo · Algunas funciones requieren claves API configurables en Render</div>
+    <div class="footer">Desarrollado por @jsemanper ·Solo uso educativo ·</div>
 </div>
 
 <script>
