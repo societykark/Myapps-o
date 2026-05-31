@@ -14,7 +14,7 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>OSINT Dashboard</title>
+    <title>SHERLOCK-OSINT</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
     <style>
@@ -147,7 +147,7 @@ HTML_TEMPLATE = """
     </div>
 
     <div id="result" class="result-box">⚡ Los resultados aparecerán aquí...</div>
-    <div class="footer">Desarrollado para uso educativo</div>
+    <div class="footer">Desarrollado por @jsemanper para uso educativo</div>
 </div>
 
 <script>
