@@ -7,6 +7,7 @@ import json
 import hashlib
 import urllib.parse
 import time
+import tempfile
 from flask import Flask, render_template_string, request, jsonify
 from werkzeug.utils import secure_filename
 
@@ -27,26 +28,25 @@ def extract_metadata(filepath, filename):
         with open(filepath, 'rb') as f:
             header = f.read(20).hex()
             metadata["magic_bytes"] = header
-        metadata["message"] = "Para metadatos completos se necesitarían librerías adicionales (Pillow, PyPDF2)."
+        metadata["message"] = "Metadatos limitados (sin Pillow)."
     else:
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
                 metadata['md5'] = hashlib.md5(content.encode()).hexdigest()
         except:
-            metadata['md5'] = "No se pudo leer (archivo binario o codificación no soportada)"
+            metadata['md5'] = "No se pudo leer (archivo binario)"
     return metadata
 
 # ================= API ENDPOINTS =================
-
-# 1. Username
+# Username
 @app.route('/api/username', methods=['POST'])
 def api_username():
     data = request.get_json()
     username = data.get('value', '')
     if not username:
         return jsonify({"error": "Username vacío"})
-    time.sleep(1)  # Pequeña pausa para no saturar la API
+    time.sleep(1)
     try:
         r = requests.get(f"https://whatsmyname.app/api/v1/username?username={username}", timeout=20)
         if r.status_code == 200:
@@ -61,7 +61,7 @@ def api_username():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 2. Email (EmailRep + HIBP)
+# Email (EmailRep + HIBP)
 EMAILREP_KEY = os.environ.get('EMAILREP_KEY', '')
 @app.route('/api/email', methods=['POST'])
 def api_email():
@@ -70,7 +70,6 @@ def api_email():
     if not email:
         return jsonify({"error": "Correo vacío"})
     result = {}
-    # EmailRep
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         if EMAILREP_KEY:
@@ -82,7 +81,6 @@ def api_email():
             result['emailrep_error'] = f"Código {r.status_code}"
     except Exception as e:
         result['emailrep_error'] = str(e)
-    # HIBP
     try:
         r = requests.get(f'https://haveibeenpwned.com/api/v3/breachedaccount/{email}', headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
         if r.status_code == 200:
@@ -95,7 +93,7 @@ def api_email():
         result['hibp_error'] = str(e)
     return jsonify(result)
 
-# 3. Teléfono (Numverify)
+# Teléfono
 NUMVERIFY_KEY = os.environ.get('NUMVERIFY_KEY', '')
 @app.route('/api/phone', methods=['POST'])
 def api_phone():
@@ -115,7 +113,7 @@ def api_phone():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 4. Dominio WHOIS
+# Dominio WHOIS
 @app.route('/api/domain', methods=['POST'])
 def api_domain():
     data = request.get_json()
@@ -136,29 +134,43 @@ def api_domain():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 5. Escáner de puertos
+# Escáner de puertos (con rango opcional)
 @app.route('/api/portscan', methods=['POST'])
 def api_portscan():
     data = request.get_json()
     host = data.get('value', '')
+    port_range = data.get('range', '21,22,23,25,53,80,110,135,139,143,443,445,993,995,1433,3306,3389,5432,5900,6379,8080,8443,27017')
     if not host:
         return jsonify({"error": "Host vacío"})
     try:
         ip = socket.gethostbyname(host)
     except:
         return jsonify({"error": "No se pudo resolver el host"})
-    common_ports = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 993, 995, 1433, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 27017]
+    ports = []
+    if '-' in port_range:
+        try:
+            start, end = map(int, port_range.split('-'))
+            if end - start > 1000:
+                return jsonify({"error": "Rango demasiado amplio (máx 1000)"})
+            ports = range(start, end+1)
+        except:
+            return jsonify({"error": "Formato inválido"})
+    else:
+        try:
+            ports = [int(p.strip()) for p in port_range.split(',')]
+        except:
+            return jsonify({"error": "Formato inválido"})
     open_ports = []
-    for port in common_ports:
+    for port in ports:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)
+        sock.settimeout(0.5)
         result = sock.connect_ex((ip, port))
         if result == 0:
             open_ports.append(port)
         sock.close()
     return jsonify({"host": host, "ip": ip, "open_ports": open_ports})
 
-# 6. Reputación IP
+# Reputación IP
 @app.route('/api/reputation', methods=['POST'])
 def api_reputation():
     data = request.get_json()
@@ -176,7 +188,7 @@ def api_reputation():
     r = requests.get(f'http://ip-api.com/json/{ip}', timeout=10)
     return jsonify(r.json())
 
-# 7. Metadatos
+# Metadatos desde archivo
 @app.route('/api/metadata', methods=['POST'])
 def api_metadata():
     if 'file' not in request.files:
@@ -193,7 +205,27 @@ def api_metadata():
     os.remove(filepath)
     return jsonify(metadata)
 
-# 8. Hash
+# Metadatos desde URL
+@app.route('/api/metadata_url', methods=['POST'])
+def api_metadata_url():
+    data = request.get_json()
+    url = data.get('value', '')
+    if not url:
+        return jsonify({"error": "URL vacía"})
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            return jsonify({"error": "No se pudo descargar"})
+        fd, temppath = tempfile.mkstemp(suffix='.jpg')
+        os.write(fd, r.content)
+        os.close(fd)
+        metadata = extract_metadata(temppath, url.split('/')[-1])
+        os.remove(temppath)
+        return jsonify(metadata)
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+# Hash
 @app.route('/api/hash', methods=['POST'])
 def api_hash():
     data = request.get_json()
@@ -201,17 +233,13 @@ def api_hash():
     if not hash_str:
         return jsonify({"error": "Hash vacío"})
     length = len(hash_str)
-    if length == 32:
-        hash_type = 'MD5'
-    elif length == 40:
-        hash_type = 'SHA1'
-    elif length == 64:
-        hash_type = 'SHA256'
-    else:
-        return jsonify({"error": "Longitud no reconocida"})
-    return jsonify({"hash": hash_str, "type": hash_type, "message": "Solo identificación, no hay crackeo"})
+    if length == 32: htype = 'MD5'
+    elif length == 40: htype = 'SHA1'
+    elif length == 64: htype = 'SHA256'
+    else: return jsonify({"error": "Longitud no reconocida"})
+    return jsonify({"hash": hash_str, "type": htype, "message": "Solo identificación"})
 
-# 9. Shodan
+# Shodan (requiere clave)
 SHODAN_KEY = os.environ.get('SHODAN_KEY', '')
 @app.route('/api/shodan', methods=['POST'])
 def api_shodan():
@@ -222,8 +250,7 @@ def api_shodan():
     if not query:
         return jsonify({"error": "Consulta vacía"})
     try:
-        url = f"https://api.shodan.io/shodan/host/{query}?key={SHODAN_KEY}"
-        r = requests.get(url, timeout=15)
+        r = requests.get(f"https://api.shodan.io/shodan/host/{query}?key={SHODAN_KEY}", timeout=15)
         if r.status_code == 200:
             return jsonify(r.json())
         else:
@@ -231,7 +258,7 @@ def api_shodan():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 10. Google Dorking
+# Google Dorking
 @app.route('/api/dork', methods=['POST'])
 def api_dork():
     data = request.get_json()
@@ -241,7 +268,7 @@ def api_dork():
     encoded = urllib.parse.quote(dork)
     return jsonify({"url": f"https://www.google.com/search?q={encoded}"})
 
-# 11. Bitcoin Analyzer
+# Bitcoin Analyzer
 @app.route('/api/bitcoin', methods=['POST'])
 def api_bitcoin():
     data = request.get_json()
@@ -258,7 +285,7 @@ def api_bitcoin():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 12. Email Forensics (cabeceras manuales)
+# Email Forensics (manual)
 @app.route('/api/email_forensics', methods=['POST'])
 def api_email_forensics():
     data = request.get_json()
@@ -273,7 +300,7 @@ def api_email_forensics():
             parsed[key.lower()] = val
     return jsonify(parsed)
 
-# 13. Data Breach Checker (HIBP)
+# Data Breach Checker
 @app.route('/api/breach', methods=['POST'])
 def api_breach():
     data = request.get_json()
@@ -292,7 +319,7 @@ def api_breach():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 14. IP Geolocation Pro
+# IP Geolocation
 @app.route('/api/ipgeo', methods=['POST'])
 def api_ipgeo():
     data = request.get_json()
@@ -305,7 +332,7 @@ def api_ipgeo():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 15. MAC Address Lookup
+# MAC Address Lookup
 @app.route('/api/mac', methods=['POST'])
 def api_mac():
     data = request.get_json()
@@ -325,7 +352,7 @@ def api_mac():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 16. Subdomain Enumeration
+# Subdomain Enumeration
 @app.route('/api/subdomains', methods=['POST'])
 def api_subdomains():
     data = request.get_json()
@@ -333,8 +360,7 @@ def api_subdomains():
     if not domain:
         return jsonify({"error": "Dominio vacío"})
     try:
-        url = f'https://crt.sh/?q=%.{domain}&output=json'
-        r = requests.get(url, timeout=20)
+        r = requests.get(f'https://crt.sh/?q=%.{domain}&output=json', timeout=20)
         if r.status_code == 200:
             data = r.json()
             subdomains = set()
@@ -350,7 +376,7 @@ def api_subdomains():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 17. Reverse Image Search
+# Reverse Image Search (genera URL)
 @app.route('/api/reverse_image', methods=['POST'])
 def api_reverse_image():
     data = request.get_json()
@@ -360,7 +386,7 @@ def api_reverse_image():
     encoded = urllib.parse.quote(image_url)
     return jsonify({"url": f"https://www.google.com/searchbyimage?image_url={encoded}"})
 
-# 18. Password Checker
+# Password Checker
 @app.route('/api/password_check', methods=['POST'])
 def api_password_check():
     data = request.get_json()
@@ -380,11 +406,11 @@ def api_password_check():
                     return jsonify({"pwned": True, "count": count})
             return jsonify({"pwned": False})
         else:
-            return jsonify({"error": "Error en la API"})
+            return jsonify({"error": "Error en API"})
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 19. AI Threat Analyzer (VirusTotal)
+# AI Threat Analyzer (VirusTotal)
 VIRUSTOTAL_KEY = os.environ.get('VIRUSTOTAL_KEY', '')
 @app.route('/api/ai_threat', methods=['POST'])
 def api_ai_threat():
@@ -395,18 +421,16 @@ def api_ai_threat():
     if not url:
         return jsonify({"error": "URL vacía"})
     try:
-        scan_url = "https://www.virustotal.com/api/v3/urls"
         headers = {"x-apikey": VIRUSTOTAL_KEY}
-        r = requests.post(scan_url, headers=headers, data={"url": url})
+        r = requests.post('https://www.virustotal.com/api/v3/urls', headers=headers, data={"url": url})
         if r.status_code == 200:
-            scan_id = r.json()['data']['id']
-            return jsonify({"message": "Escaneo enviado", "id": scan_id})
+            return jsonify({"message": "Escaneo enviado", "id": r.json()['data']['id']})
         else:
             return jsonify({"error": "Error en VirusTotal"})
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 20. JS Secret Scanner
+# JS Secret Scanner
 @app.route('/api/js_secrets', methods=['POST'])
 def api_js_secrets():
     data = request.get_json()
@@ -424,8 +448,8 @@ def api_js_secrets():
                 "JWT": r'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+'
             }
             found = []
-            for name, pattern in patterns.items():
-                matches = re.findall(pattern, content)
+            for name, pat in patterns.items():
+                matches = re.findall(pat, content)
                 if matches:
                     found.append({"type": name, "matches": matches[:3]})
             return jsonify({"secrets_found": found})
@@ -434,7 +458,7 @@ def api_js_secrets():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 21. Wayback URLs
+# Wayback URLs
 @app.route('/api/wayback', methods=['POST'])
 def api_wayback():
     data = request.get_json()
@@ -450,7 +474,7 @@ def api_wayback():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 22. Subdomain Takeover
+# Subdomain Takeover
 @app.route('/api/takeover', methods=['POST'])
 def api_takeover():
     data = request.get_json()
@@ -458,8 +482,7 @@ def api_takeover():
     if not domain:
         return jsonify({"error": "Dominio vacío"})
     try:
-        url = f"https://crt.sh/?q=%25.{domain}&output=json"
-        r = requests.get(url, timeout=20)
+        r = requests.get(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=20)
         if r.status_code == 200:
             data = r.json()
             subdomains = set()
@@ -486,17 +509,14 @@ def api_takeover():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 23. Exposed Files
+# Exposed Files
 @app.route('/api/exposed_files', methods=['POST'])
 def api_exposed_files():
     data = request.get_json()
     domain = data.get('value', '')
     if not domain:
         return jsonify({"error": "Dominio vacío"})
-    common_files = [
-        "/robots.txt", "/.env", "/.git/config", "/backup.zip", "/backup.sql",
-        "/config.php", "/wp-config.php", "/.htaccess", "/phpinfo.php", "/admin/config.php"
-    ]
+    common_files = ["/robots.txt", "/.env", "/.git/config", "/backup.zip", "/backup.sql", "/config.php", "/wp-config.php", "/.htaccess", "/phpinfo.php", "/admin/config.php"]
     found = []
     for path in common_files:
         url = f"http://{domain}{path}"
@@ -508,7 +528,7 @@ def api_exposed_files():
             pass
     return jsonify({"exposed": found})
 
-# 24. Security Headers
+# Security Headers
 @app.route('/api/security_headers', methods=['POST'])
 def api_security_headers():
     data = request.get_json()
@@ -530,7 +550,7 @@ def api_security_headers():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 25. CVE Search
+# CVE Search
 @app.route('/api/cve', methods=['POST'])
 def api_cve():
     data = request.get_json()
@@ -538,8 +558,7 @@ def api_cve():
     if not keyword:
         return jsonify({"error": "Palabra clave vacía"})
     try:
-        url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch={keyword}&resultsPerPage=20"
-        r = requests.get(url, timeout=20)
+        r = requests.get(f"https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch={keyword}&resultsPerPage=20", timeout=20)
         if r.status_code == 200:
             return jsonify(r.json())
         else:
@@ -547,7 +566,7 @@ def api_cve():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 26. ASN Lookup
+# ASN Lookup
 @app.route('/api/asn', methods=['POST'])
 def api_asn():
     data = request.get_json()
@@ -564,29 +583,26 @@ def api_asn():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 27. S3 Bucket Finder
+# S3 Bucket Finder
 @app.route('/api/s3finder', methods=['POST'])
 def api_s3finder():
     data = request.get_json()
     company = data.get('value', '')
     if not company:
         return jsonify({"error": "Nombre vacío"})
-    permutations = [
-        company, f"{company}-backup", f"{company}-dev", f"{company}-prod", f"{company}-staging",
-        f"{company}-data", f"{company}-static", f"{company}-assets", f"{company}-media", f"{company}-cdn"
-    ]
+    perms = [company, f"{company}-backup", f"{company}-dev", f"{company}-prod", f"{company}-staging", f"{company}-data", f"{company}-static", f"{company}-assets", f"{company}-media", f"{company}-cdn"]
     found = []
-    for bucket in permutations:
+    for bucket in perms:
         url = f"https://{bucket}.s3.amazonaws.com"
         try:
             r = requests.get(url, timeout=5)
-            if r.status_code in [200, 403]:
+            if r.status_code in [200,403]:
                 found.append({"bucket": bucket, "status": r.status_code})
         except:
             pass
     return jsonify({"buckets": found})
 
-# 28. CORS Check
+# CORS Check
 @app.route('/api/cors', methods=['POST'])
 def api_cors():
     data = request.get_json()
@@ -600,7 +616,7 @@ def api_cors():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# 29. GitHub Secrets Search
+# GitHub Secrets
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
 @app.route('/api/github_secrets', methods=['POST'])
 def api_github_secrets():
@@ -621,10 +637,42 @@ def api_github_secrets():
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# ================= RUTAS PWA =================
+# Tech Detection
+@app.route('/api/tech_detect', methods=['POST'])
+def api_tech_detect():
+    data = request.get_json()
+    domain = data.get('value', '')
+    if not domain:
+        return jsonify({"error": "Dominio vacío"})
+    if not domain.startswith('http'):
+        domain = 'https://' + domain
+    try:
+        r = requests.get(domain, timeout=10, verify=False)
+        headers = r.headers
+        content = r.text[:5000]
+        tech = {}
+        if 'Server' in headers:
+            tech['Servidor'] = headers['Server']
+        if 'x-powered-by' in headers:
+            tech['Powered by'] = headers['x-powered-by']
+        if '/wp-content/' in content:
+            tech['CMS'] = 'WordPress'
+        if 'Drupal' in content:
+            tech['CMS'] = 'Drupal'
+        if 'Joomla' in content:
+            tech['CMS'] = 'Joomla'
+        if 'laravel' in content.lower():
+            tech['Framework'] = 'Laravel'
+        if 'django' in content.lower():
+            tech['Framework'] = 'Django'
+        return jsonify({"domain": domain, "technologies": tech})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+# ================= PWA y FRONTEND =================
 @app.route('/manifest.json')
 def manifest():
-    manifest_data = {
+    return jsonify({
         "name": "OSINT Dashboard",
         "short_name": "OSINT",
         "start_url": "/",
@@ -632,75 +680,69 @@ def manifest():
         "background_color": "#0a0a0a",
         "theme_color": "#00ff00",
         "icons": [{
-            "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAAAAXNSR0IArs4c6QAABThJREFUeJztnV1yozAMheX+nXbv/0hYCyIuiwU2kNh5t09npvvQOSB+2RHWwvrgv1/7S+NrUfr7X1lH8V+3AoQBACAAAARAQJQACICoBEAARAEAQAAAQAACIAoAAEAAAhAQAACAAARAiAIAABAAIAACEAABAAAIgAAEQMCF79C7+/n/D3uvH1YA5MJfvU+E9n2/3/vz/gRAAHRfe25fQK5n6Q3vhAQgIAIgIAIgIAIgIAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIiAAIi4O+7n6F/giMEQEBEAAREQAAEQEAEfCYSgAAIgAAIiIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAACIAAC0G/DsPA6fF49rQAAAABJRU5ErkJggg==",
+            "src": "https://cdn-icons-png.flaticon.com/512/1061/1061105.png",
             "sizes": "512x512",
             "type": "image/png"
         }]
-    }
-    return jsonify(manifest_data)
+    })
 
 @app.route('/sw.js')
-def service_worker():
-    sw_js = """
+def sw():
+    return app.response_class("""
 const CACHE_NAME = 'osint-v1';
-const urlsToCache = ['/', '/static/manifest.json'];
-self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(urlsToCache)));
-});
-self.addEventListener('fetch', event => {
-  event.respondWith(caches.match(event.request).then(response => response || fetch(event.request)));
-});
-"""
-    return app.response_class(sw_js, content_type='application/javascript')
+const urlsToCache = ['/'];
+self.addEventListener('install', e => e.waitUntil(caches.open(CACHE_NAME).then(c => c.addAll(urlsToCache))));
+self.addEventListener('fetch', e => e.respondWith(caches.match(e.request).then(r => r || fetch(e.request))));
+""", content_type='application/javascript')
 
-# ================= INTERFAZ HTML =================
 HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>OSINT Dashboard Ultimate</title>
+    <title>OSINT Dashboard</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
     <link rel="manifest" href="/manifest.json">
     <style>
-        * { box-sizing: border-box; }
-        body { font-family: 'Courier New', monospace; background: #0a0a0a; color: #00ff00; margin: 0; padding: 20px; }
-        .container { max-width: 1200px; margin: auto; background: #111; border-radius: 24px; padding: 24px; box-shadow: 0 0 15px rgba(0,255,0,0.2); border: 1px solid #00ff00; }
-        h1, h2 { color: #00ff00; text-shadow: 0 0 5px #00ff00; }
-        h1 { font-size: 1.8rem; text-align: center; }
-        .sub { text-align: center; margin-bottom: 2rem; color: #0f0; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
-        .card { background: #0a0a0a; border-radius: 16px; padding: 16px; border-left: 4px solid #00ff00; border: 1px solid #00ff00; }
-        input, button, textarea, select { padding: 12px 16px; margin-top: 8px; border-radius: 12px; border: none; font-size: 1rem; width: 100%; background: #222; color: #0f0; border: 1px solid #0f0; font-family: monospace; }
-        button { background: #0f0; color: #000; font-weight: bold; cursor: pointer; transition: transform 0.1s; border: none; }
-        button:active { transform: scale(0.97); }
-        .result-box { background: #0a0a0a; padding: 16px; border-radius: 12px; margin-top: 20px; font-family: monospace; font-size: 0.8rem; border: 1px solid #0f0; max-height: 500px; overflow: auto; white-space: pre-wrap; }
-        .badge { background: #0f0; color: #000; padding: 2px 8px; border-radius: 20px; font-size: 0.7rem; display: inline-block; margin-bottom: 8px; }
-        .footer { text-align: center; margin-top: 24px; font-size: 0.7rem; color: #0f0; }
+        *{box-sizing:border-box}
+        body{font-family:'Courier New',monospace;background:#0a0a0a;color:#00ff00;margin:0;padding:20px}
+        .container{max-width:1200px;margin:auto;background:#111;border-radius:24px;padding:24px;border:1px solid #0f0;box-shadow:0 0 15px rgba(0,255,0,0.2)}
+        h1,h2{color:#0f0;text-shadow:0 0 5px #0f0}
+        h1{font-size:1.8rem;text-align:center}
+        .sub{text-align:center;margin-bottom:2rem;color:#0f0}
+        .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:20px}
+        .card{background:#0a0a0a;border-radius:16px;padding:16px;border-left:4px solid #0f0;border:1px solid #0f0}
+        input,button,textarea,select{padding:12px 16px;margin-top:8px;border-radius:12px;font-size:1rem;width:100%;background:#222;color:#0f0;border:1px solid #0f0;font-family:monospace}
+        button{background:#0f0;color:#000;font-weight:bold;cursor:pointer;transition:transform 0.1s}
+        button:active{transform:scale(0.97)}
+        .result-box{background:#0a0a0a;padding:16px;border-radius:12px;margin-top:20px;font-family:monospace;font-size:0.8rem;border:1px solid #0f0;max-height:500px;overflow:auto;white-space:pre-wrap}
+        .badge{background:#0f0;color:#000;padding:2px 8px;border-radius:20px;font-size:0.7rem;display:inline-block;margin-bottom:8px}
+        .footer{text-align:center;margin-top:24px;font-size:0.7rem;color:#0f0}
     </style>
 </head>
 <body>
 <div class="container">
-    <h1>🕵️‍♂️ OSINT Dashboard Ultimate</h1>
+    <h1>🕵️‍♂️ OSINT Dashboard</h1>
     <div class="sub">Herramientas de inteligencia de fuentes abiertas</div>
     <div class="grid">
-        <div class="card"><div class="badge">🔍 Username</div><input type="text" id="username" placeholder="Nombre de usuario"><button onclick="analyze('username')">Buscar</button></div>
+        <div class="card"><div class="badge">🔍 Username</div><input type="text" id="username" placeholder="Nombre"><button onclick="analyze('username')">Buscar</button></div>
         <div class="card"><div class="badge">📧 Email</div><input type="text" id="email" placeholder="correo@ejemplo.com"><button onclick="analyze('email')">Analizar</button></div>
         <div class="card"><div class="badge">📞 Teléfono</div><input type="text" id="phone" placeholder="+521234567890"><button onclick="analyze('phone')">Consultar</button></div>
         <div class="card"><div class="badge">🌐 Dominio (WHOIS)</div><input type="text" id="domain" placeholder="ejemplo.com"><button onclick="analyze('domain')">WHOIS</button></div>
         <div class="card"><div class="badge">🔌 Escáner de Puertos</div><input type="text" id="portscan" placeholder="ejemplo.com"><button onclick="analyze('portscan')">Escanea puertos comunes</button></div>
         <div class="card"><div class="badge">⚡ Reputación IP/Dominio</div><input type="text" id="reputation" placeholder="IP o dominio"><button onclick="analyze('reputation')">Verificar</button></div>
-        <div class="card"><div class="badge">🖼️ Metadatos</div><input type="file" id="metadatafile"><button onclick="uploadMetadata()">Subir y extraer</button></div>
-        <div class="card"><div class="badge">🔐 Analizador de Hash</div><input type="text" id="hash" placeholder="MD5, SHA1, SHA256"><button onclick="analyze('hash')">Analizar</button></div>
-        <div class="card"><div class="badge">🔎 Shodan Search</div><input type="text" id="shodan" placeholder="IP"><button onclick="analyze('shodan')">Buscar</button><small>Requiere API key</small></div>
-        <div class="card"><div class="badge">📄 Google Dorking</div><input type="text" id="dork" placeholder="site:example.com filetype:pdf"><button onclick="analyze('dork')">Generar URL</button></div>
-        <div class="card"><div class="badge">₿ Bitcoin Analyzer</div><input type="text" id="bitcoin" placeholder="Dirección BTC"><button onclick="analyze('bitcoin')">Consultar</button></div>
-        <div class="card"><div class="badge">✉️ Email Forensics</div><textarea id="email_headers" rows="2" placeholder="Pega cabeceras de email"></textarea><button onclick="analyze('email_forensics')">Analizar</button></div>
-        <div class="card"><div class="badge">📊 Data Breach Checker</div><input type="text" id="breach" placeholder="correo@ejemplo.com"><button onclick="analyze('breach')">Verificar filtraciones</button></div>
-        <div class="card"><div class="badge">🌍 IP Geolocation Pro</div><input type="text" id="ipgeo" placeholder="IP"><button onclick="analyze('ipgeo')">Localizar</button></div>
+        <div class="card"><div class="badge">🖼️ Metadatos (archivo)</div><input type="file" id="metadatafile"><button onclick="uploadMetadata()">Subir</button></div>
+        <div class="card"><div class="badge">🖼️ Metadatos (URL)</div><input type="text" id="metadata_url" placeholder="URL imagen"><button onclick="analyze('metadata_url')">Extraer</button></div>
+        <div class="card"><div class="badge">🔐 Analizador de Hash</div><input type="text" id="hash" placeholder="MD5,SHA1,SHA256"><button onclick="analyze('hash')">Analizar</button></div>
+        <div class="card"><div class="badge">🔎 Shodan</div><input type="text" id="shodan" placeholder="IP"><button onclick="analyze('shodan')">Buscar</button><small>Requiere API key</small></div>
+        <div class="card"><div class="badge">📄 Google Dorking</div><input type="text" id="dork" placeholder="site:example.com"><button onclick="analyze('dork')">Generar URL</button></div>
+        <div class="card"><div class="badge">₿ Bitcoin</div><input type="text" id="bitcoin" placeholder="Dirección BTC"><button onclick="analyze('bitcoin')">Consultar</button></div>
+        <div class="card"><div class="badge">✉️ Email Forensics</div><textarea id="email_headers" rows="2" placeholder="Cabeceras de email"></textarea><button onclick="analyze('email_forensics')">Analizar</button></div>
+        <div class="card"><div class="badge">📊 Data Breach</div><input type="text" id="breach" placeholder="correo@ejemplo.com"><button onclick="analyze('breach')">Verificar filtraciones</button></div>
+        <div class="card"><div class="badge">🌍 IP Geolocation</div><input type="text" id="ipgeo" placeholder="IP"><button onclick="analyze('ipgeo')">Localizar</button></div>
         <div class="card"><div class="badge">🖧 MAC Lookup</div><input type="text" id="mac" placeholder="AA:BB:CC:DD:EE:FF"><button onclick="analyze('mac')">Fabricante</button></div>
         <div class="card"><div class="badge">📡 Subdomain Enumeration</div><input type="text" id="subdomains" placeholder="dominio.com"><button onclick="analyze('subdomains')">Enumerar</button></div>
-        <div class="card"><div class="badge">🔍 Reverse Image Search</div><input type="text" id="reverse_image" placeholder="URL de imagen"><button onclick="analyze('reverse_image')">Generar búsqueda</button></div>
+        <div class="card"><div class="badge">🔍 Reverse Image Search</div><input type="text" id="reverse_image" placeholder="URL imagen"><button onclick="analyze('reverse_image')">Generar búsqueda</button></div>
         <div class="card"><div class="badge">🔑 Password Checker</div><input type="text" id="password" placeholder="Contraseña"><button onclick="analyze('password_check')">Verificar filtrada</button></div>
         <div class="card"><div class="badge">🤖 AI Threat Analyzer</div><input type="text" id="ai_threat" placeholder="URL sospechosa"><button onclick="analyze('ai_threat')">Analizar</button><small>Requiere VT key</small></div>
         <div class="card"><div class="badge">💻 JS Secret Scanner</div><input type="text" id="js_secrets" placeholder="URL .js"><button onclick="analyze('js_secrets')">Buscar secretos</button></div>
@@ -708,11 +750,12 @@ HTML = """
         <div class="card"><div class="badge">⚠️ Subdomain Takeover</div><input type="text" id="takeover" placeholder="dominio.com"><button onclick="analyze('takeover')">Detectar</button></div>
         <div class="card"><div class="badge">📁 Exposed Files</div><input type="text" id="exposed" placeholder="dominio.com"><button onclick="analyze('exposed_files')">Buscar archivos sensibles</button></div>
         <div class="card"><div class="badge">🛡️ Security Headers</div><input type="text" id="headers" placeholder="https://ejemplo.com"><button onclick="analyze('security_headers')">Auditar</button></div>
-        <div class="card"><div class="badge">🐞 CVE Search</div><input type="text" id="cve" placeholder="apache, wordpress"><button onclick="analyze('cve')">Buscar vulnerabilidades</button></div>
+        <div class="card"><div class="badge">🐞 CVE Search</div><input type="text" id="cve" placeholder="apache"><button onclick="analyze('cve')">Buscar vulnerabilidades</button></div>
         <div class="card"><div class="badge">🌐 ASN Lookup</div><input type="text" id="asn" placeholder="IP"><button onclick="analyze('asn')">ASN/Org</button></div>
         <div class="card"><div class="badge">📦 S3 Bucket Finder</div><input type="text" id="s3finder" placeholder="Empresa"><button onclick="analyze('s3finder')">Buscar buckets</button></div>
         <div class="card"><div class="badge">🔗 CORS Check</div><input type="text" id="cors" placeholder="https://ejemplo.com"><button onclick="analyze('cors')">Testear CORS</button></div>
         <div class="card"><div class="badge">🔑 GitHub Secrets</div><input type="text" id="github_secrets" placeholder="Organización"><button onclick="analyze('github_secrets')">Buscar secretos</button><small>Requiere token</small></div>
+        <div class="card"><div class="badge">🌡️ Tech Detection</div><input type="text" id="tech_detect" placeholder="dominio.com"><button onclick="analyze('tech_detect')">Detectar tecnologías</button></div>
     </div>
     <div id="result" class="result-box">⚡ Resultados aquí...</div>
     <div class="footer">Desarrollado por @jsemanper · Uso educativo</div>
@@ -723,21 +766,8 @@ HTML = """
         if (type === 'email_forensics') value = document.getElementById('email_headers').value;
         if (!value) { document.getElementById('result').innerText = '❌ Ingresa un valor.'; return; }
         document.getElementById('result').innerText = '⏳ Consultando...';
-        let endpoint = type;
-        if (type === 'password_check') endpoint = 'password_check';
-        else if (type === 'ai_threat') endpoint = 'ai_threat';
-        else if (type === 'js_secrets') endpoint = 'js_secrets';
-        else if (type === 'wayback') endpoint = 'wayback';
-        else if (type === 'takeover') endpoint = 'takeover';
-        else if (type === 'exposed_files') endpoint = 'exposed_files';
-        else if (type === 'security_headers') endpoint = 'security_headers';
-        else if (type === 'cve') endpoint = 'cve';
-        else if (type === 'asn') endpoint = 'asn';
-        else if (type === 's3finder') endpoint = 's3finder';
-        else if (type === 'cors') endpoint = 'cors';
-        else if (type === 'github_secrets') endpoint = 'github_secrets';
         try {
-            const res = await fetch(`/api/${endpoint}`, {
+            const res = await fetch(`/api/${type}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ value: value })
@@ -750,9 +780,8 @@ HTML = """
     }
     async function uploadMetadata() {
         const file = document.getElementById('metadatafile').files[0];
-        if (!file) { document.getElementById('result').innerText = '❌ Selecciona un archivo.'; return; }
-        const fd = new FormData();
-        fd.append('file', file);
+        if (!file) { document.getElementById('result').innerText = '❌ Selecciona archivo.'; return; }
+        const fd = new FormData(); fd.append('file', file);
         document.getElementById('result').innerText = '⏳ Subiendo...';
         try {
             const res = await fetch('/api/metadata', { method: 'POST', body: fd });
@@ -763,9 +792,7 @@ HTML = """
         }
     }
     if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-            navigator.serviceWorker.register('/sw.js').then(reg => console.log('SW registrado')).catch(err => console.log('SW error', err));
-        });
+        window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').then(r => console.log('SW ok')).catch(e => console.log('SW error', e)));
     }
 </script>
 </body>
